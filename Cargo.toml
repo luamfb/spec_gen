@@ -1,0 +1,8 @@
+[package]
+name = "spec_gen"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+nix = { version = "0.31", features = ["ptrace", "process"] }
+clap = { version = "4.6", features = ["derive"] }
