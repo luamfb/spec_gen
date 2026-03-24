@@ -15,8 +15,12 @@
 // with spec_gen. If not, see <https://www.gnu.org/licenses/>.
 
 mod args;
+mod debug_info;
 
-use std::io;
+use std::{
+    fs,
+    io,
+};
 
 use clap::Parser;
 use nix::{
@@ -28,11 +32,25 @@ use nix::{
     },
 };
 
-use crate::args::Cli;
+use crate::{
+    args::Cli,
+    debug_info::DebugInfo,
+};
+
+fn dump_prog_functions(filename: &str) {
+    let data = fs::read(filename).expect("failed to read file");
+    let debug_info = DebugInfo::new(&data).expect("failed to get debug info");
+    debug_info.dump_functions(&mut io::stdout()).expect("dump_functions failed");
+}
 
 fn main() {
     let mut cli = Cli::parse();
     cli.args.insert(0, cli.cmd.clone()); // use command name as argv[0]
+
+    dump_prog_functions(
+        cli.cmd
+        .to_str()
+        .expect("failed to convert name to &str"));
 
     match unsafe {unistd::fork()} {
         Err(_) => panic!("fork() failed!"),
