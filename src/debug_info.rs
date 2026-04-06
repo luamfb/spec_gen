@@ -21,6 +21,7 @@ use std::{
 };
 
 use gimli::{
+    AttributeValue,
     DebuggingInformationEntry,
     Dwarf,
     EndianSlice,
@@ -70,8 +71,9 @@ impl<'a> DebugInfo<'a> {
     }
 
     // FIXME less generic error type
-    pub fn dump_functions<F: io::Write>(&self, file: &mut F) -> Result<(), Box<dyn Error>> 
-    {
+    pub fn get_all_func_name_and_addr(&self)
+            -> Result<Vec<(&str, Option<u64>)>, Box<dyn Error>> {
+        let mut retval = Vec::new();
         for header in self.dwarf.units() {
             let header = header?;
             let unit = self.dwarf.unit(header)?;
@@ -79,12 +81,13 @@ impl<'a> DebugInfo<'a> {
             while let Some(entry) = entries.next_dfs()? {
                 if entry.tag() == gimli::DW_TAG_subprogram {
                     if let Some(name) = self.entry_name(&unit, &entry) {
-                        writeln!(file, "{}", name)?;
+                        let opt_low_pc_addr = self.entry_low_pc(&entry);
+                        retval.push((name, opt_low_pc_addr));
                     }
                 }
             }
         }
-        Ok(())
+        Ok(retval)
     }
 
     pub fn entry_name(&self, unit: &UnitType<'a>, entry: &EntryType<'a>)
@@ -102,4 +105,17 @@ impl<'a> DebugInfo<'a> {
         }
         None
     }
+
+    // get the address in DW_AT_low_pc DWARF attribute
+    pub fn entry_low_pc(&self, entry: &EntryType<'a>) -> Option<u64> {
+        for attr in entry.attrs.iter() {
+            if attr.name() == gimli::constants::DW_AT_low_pc {
+                if let AttributeValue::Addr(addr) = attr.value() {
+                    return Some(addr);
+                }
+            }
+        }
+        None
+    }
+
 }
