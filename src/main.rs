@@ -27,6 +27,7 @@ use nix::{
     libc,
     unistd::{self, ForkResult},
     sys::{
+        personality::{self, Persona},
         ptrace,
         wait,
     },
@@ -52,11 +53,23 @@ fn main() {
         .to_str()
         .expect("failed to convert name to &str"));
 
+    let orig_persona = personality::get()
+        .expect("failed to get original persona");
+
     match unsafe {unistd::fork()} {
         Err(_) => panic!("fork() failed!"),
         Ok(ForkResult::Child) => {
             if let Err(_) = ptrace::traceme() {
                 unistd::write(io::stderr(), "traceme() failed!\n".as_bytes())
+                    .ok();
+                unsafe { libc::_exit(1); }
+            }
+
+            let new_persona = Persona::union(orig_persona,
+                Persona::ADDR_NO_RANDOMIZE);
+            // note: must be set before exec'ing
+            if let Err(_) = personality::set(new_persona) {
+                unistd::write(io::stderr(), b"personality() failed!\n")
                     .ok();
                 unsafe { libc::_exit(1); }
             }
