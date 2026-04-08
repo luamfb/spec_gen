@@ -16,6 +16,7 @@
 
 mod args;
 mod debug_info;
+mod proc_maps;
 mod tracer;
 
 use std::{
