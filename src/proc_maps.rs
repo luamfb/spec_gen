@@ -26,11 +26,19 @@ use nom::{
     bytes::{
         complete::tag,
         take_until,
+        take_while,
     },
     character::complete::anychar,
-    combinator::{map, value},
+    combinator::{
+        map,
+        map_res,
+        value,
+    },
     multi::separated_list0,
-    sequence::terminated,
+    sequence::{
+        separated_pair,
+        terminated,
+    },
     IResult,
     Parser,
 };
@@ -59,6 +67,20 @@ impl From<(bool, bool, bool)> for PermissionSet {
             execute,
         }
     }
+}
+
+fn parse_addr_range<'a>(input: &[u8]) -> IResult<&[u8], (u64, u64)> {
+    separated_pair(parse_hex, tag(b"-".as_slice()), parse_hex).parse(input)
+}
+
+// "pure" hex, without 0x prefix
+fn parse_hex<'a>(input: &[u8]) -> IResult<&[u8], u64> {
+    map_res(
+        take_while(|x: u8| x.is_ascii_hexdigit()),
+        // ideally we shouldn't need to convert ot &str first but...
+        |s: &[u8]| u64::from_str_radix(
+            str::from_utf8(s).expect("/proc/PID/maps has invalid UTF-8"), 16)
+    ).parse(input)
 }
 
 fn parse_permissions<'a>(input: &[u8]) -> IResult<&[u8], PermissionSet> {
@@ -125,5 +147,21 @@ mod tests {
             execute: false,
         };
         assert_eq!(parse_permissions(b"---p"), Ok((b"".as_slice(), perms)));
+    }
+
+    #[test]
+    fn addr_range_parser1() {
+        let expected = (0x400000, 0x452000);
+        assert_eq!(
+            parse_addr_range(b"00400000-00452000 etc"),
+            Ok((b" etc".as_slice(), expected)));
+    }
+
+    #[test]
+    fn addr_range_parser2() {
+        let expected = (0x35b1800000, 0x35b1820000);
+        assert_eq!(
+            parse_addr_range(b"35b1800000-35b1820000 foo"),
+            Ok((b" foo".as_slice(), expected)));
     }
 }
