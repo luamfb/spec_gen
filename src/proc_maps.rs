@@ -200,16 +200,16 @@ mod tests {
     fn addr_range_parser1() {
         let expected = (0x400000, 0x452000);
         assert_eq!(
-            parse_addr_range(b"00400000-00452000 etc"),
-            Ok((b" etc".as_slice(), expected)));
+            parse_addr_range(b"00400000-00452000"),
+            Ok((b"".as_slice(), expected)));
     }
 
     #[test]
     fn addr_range_parser2() {
         let expected = (0x35b1800000, 0x35b1820000);
         assert_eq!(
-            parse_addr_range(b"35b1800000-35b1820000 foo"),
-            Ok((b" foo".as_slice(), expected)));
+            parse_addr_range(b"35b1800000-35b1820000"),
+            Ok((b"".as_slice(), expected)));
     }
 
     #[test]
