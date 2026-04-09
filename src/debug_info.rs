@@ -16,10 +16,12 @@
 
 use std::{
     io,
+    fmt::Debug,
     error::Error,
     default::Default,
 };
 
+use anyhow::Context;
 use gimli::{
     AttributeValue,
     DebuggingInformationEntry,
@@ -61,24 +63,28 @@ impl<'a> DebugInfo<'a> {
         })
     }
 
-    //FIXME less generic error type
-    pub fn dump_sections<F: io::Write>(&self, file: &mut F) -> Result<(), Box<dyn Error>> {
+    pub fn dump_sections<F: io::Write + Debug>(&self, file: &mut F)
+            -> anyhow::Result<()> {
         for section in self.obj.sections() {
-            let sec_name = section.name()?;
-            writeln!(file, "{}", sec_name)?;
+            let sec_name = section.name()
+                .context("name of object section is not a valid UTF-8 string")?;
+            writeln!(file, "{}", sec_name)
+                .context(format!("failed to write to file '{:?}'", file))?;
         }
         Ok(())
     }
 
-    // FIXME less generic error type
     pub fn get_all_func_name_and_addr(&self)
-            -> Result<Vec<(&str, Option<u64>)>, Box<dyn Error>> {
+            -> anyhow::Result<Vec<(&str, Option<u64>)>> {
         let mut retval = Vec::new();
         for header in self.dwarf.units() {
-            let header = header?;
-            let unit = self.dwarf.unit(header)?;
+            let header = header
+                .context("failed to get DWARF unit header")?;
+            let unit = self.dwarf.unit(header)
+                .context("failed to construct DWARF unit from header")?;
             let mut entries = unit.entries();
-            while let Some(entry) = entries.next_dfs()? {
+            while let Some(entry) = entries.next_dfs()
+                    .context("failed to get debugging information entry")? {
                 if entry.tag() == gimli::DW_TAG_subprogram {
                     if let Some(name) = self.entry_name(&unit, &entry) {
                         let opt_low_pc_addr = self.entry_low_pc(&entry);
