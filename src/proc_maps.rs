@@ -19,8 +19,16 @@
 
 use std::{
     convert::From,
+    iter::Iterator,
+    fs::File,
+    io::{
+        Cursor,
+        Bytes,
+        Read,
+    },
 };
 
+use anyhow::Context;
 use nom::{
     branch::alt,
     bytes::complete::{
@@ -76,12 +84,91 @@ impl From<(bool, bool, bool)> for PermissionSet {
     }
 }
 
-pub fn parse_proc_maps<'a>(input: &'a [u8])
-        -> Result<Vec<ProcMapEntry>, Error<&'a [u8]>> {
-    let (_, entries) = many0(parse_single_line)
-        .parse(input)
-        .finish()?;
-    Ok(entries)
+#[derive(Debug)]
+pub struct ProcMapParser<R> {
+    // Since we're (presumably) reading from the /proc filesystem, there's
+    // no need to use a BufReader; calling `read` for each byte should be fine
+    bytes: Bytes<R>,
+}
+
+impl ProcMapParser<File> {
+    pub fn from_path(path: &str) -> anyhow::Result<Self> {
+        let file = File::open(path)
+            .context(format!("failed to open process memory map file '{}'",
+                    path))?;
+        Ok(ProcMapParser {
+            bytes: file.bytes()
+        })
+    }
+}
+
+impl ProcMapParser<Cursor<Vec<u8>>> {
+    pub fn from_mem(mem: Vec<u8>) -> Self {
+        let cursor = Cursor::new(mem);
+        ProcMapParser {
+            bytes: cursor.bytes()
+        }
+    }
+}
+
+impl<R: Read> ProcMapParser<R> {
+    pub fn from_read(r: R) -> Self {
+        ProcMapParser {
+            bytes: r.bytes()
+        }
+    }
+
+    // helper function for the iterator
+    fn next_line(&mut self) -> anyhow::Result<Vec<u8>> {
+        let mut line = Vec::new();
+        while let Some(res) = self.bytes.next() {
+            let byte = res
+                .context("failed to read next byte from process memory map")?;
+            line.push(byte);
+            if byte == b'\n' {
+                break;
+            }
+        }
+        Ok(line)
+    }
+}
+
+impl<R:Read> Iterator for ProcMapParser<R> {
+    type Item = anyhow::Result<ProcMapEntry>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        // alas, we can't use `?` in either of those
+        let line = match self.next_line() {
+            Err(e) => return Some(Err(e)),
+            Ok(s) => s,
+        };
+        if line.len() == 0 {
+            return None;
+        }
+        match parse_proc_maps_entry(&line) {
+            Err(err) => Some(Err(err.into())),
+            Ok(entry) => Some(Ok(entry))
+        }
+    }
+}
+
+fn parse_proc_maps_entry(input: &[u8])
+        -> Result<ProcMapEntry, nom::error::Error<String>> {
+
+    match parse_single_line(&input).finish() {
+        // discard remaining input, return entry only
+        Ok((_input, entry)) => Ok(entry),
+        Err(e) => {
+            // Due to trait bounds in `nom`, nom::error::Error only implements
+            // the std::error::Error trait (necessary for `anyhow` to work)
+            // when the input type implements Display, which &[u8] doesn't.
+            // So we first make a new error with a string input type.
+            let conv_err = nom::error::Error::new(
+                String::from_utf8_lossy(e.input).into_owned(),
+                e.code);
+            Err(conv_err)
+        },
+    }
 }
 
 fn parse_single_line(input: &[u8]) -> IResult<&[u8], ProcMapEntry> {
@@ -328,9 +415,17 @@ b"35b1800000-35b1820000 r-xp 00000000 08:02 135522  /usr/lib64/ld-2.15.so
             },
             path: b"/usr/lib64/ld-2.15.so".to_vec(),
         };
+
+        let mut parser = ProcMapParser::from_mem(input.to_vec());
         assert_eq!(
-            parse_proc_maps(input),
-            Ok(vec![entry1, entry2, entry3])
-        );
+            parser.next().expect("1st entry is None").expect("1st entry is Err"),
+            entry1);
+        assert_eq!(
+            parser.next().expect("2nd entry is None").expect("2nd entry is Err"),
+            entry2);
+        assert_eq!(
+            parser.next().expect("3rd entry is None").expect("3rd entry is Err"),
+            entry3);
+        assert!(parser.next().is_none());
     }
 }
