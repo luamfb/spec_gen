@@ -51,11 +51,11 @@ use nom::{
 };
 
 #[derive(Debug, PartialEq, Eq)]
-pub struct ProcMapEntry<'a> {
+pub struct ProcMapEntry {
     start_addr: u64,
     end_addr: u64,
     perm: PermissionSet,
-    path: &'a [u8],
+    path: Vec<u8>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -77,14 +77,14 @@ impl From<(bool, bool, bool)> for PermissionSet {
 }
 
 pub fn parse_proc_maps<'a>(input: &'a [u8])
-        -> Result<Vec<ProcMapEntry<'a>>, Error<&'a [u8]>> {
+        -> Result<Vec<ProcMapEntry>, Error<&'a [u8]>> {
     let (_, entries) = many0(parse_single_line)
         .parse(input)
         .finish()?;
     Ok(entries)
 }
 
-fn parse_single_line<'a>(input: &'a [u8]) -> IResult<&'a [u8], ProcMapEntry<'a>> {
+fn parse_single_line(input: &[u8]) -> IResult<&[u8], ProcMapEntry> {
     map(
         separated_pair(
             parse_addr_range,
@@ -94,21 +94,21 @@ fn parse_single_line<'a>(input: &'a [u8]) -> IResult<&'a [u8], ProcMapEntry<'a>>
                 parse_whitespace,
                 preceded(
                     // offset, dev and inode -- discarded
-                    count(terminated(parse_field, parse_whitespace), 3),
+                    count(terminated(discard_field, parse_whitespace), 3),
                     // pathname
-                    terminated(parse_field, parse_newline_or_eof)))),
+                    terminated(parse_field_owned, parse_newline_or_eof)))),
         |((start_addr, end_addr), (perm, path))| ProcMapEntry {
             start_addr, end_addr, perm, path
         }
     ).parse(input)
 }
 
-fn parse_addr_range<'a>(input: &[u8]) -> IResult<&[u8], (u64, u64)> {
+fn parse_addr_range(input: &[u8]) -> IResult<&[u8], (u64, u64)> {
     separated_pair(parse_hex, tag(b"-".as_slice()), parse_hex).parse(input)
 }
 
 // "pure" hex, without 0x prefix
-fn parse_hex<'a>(input: &[u8]) -> IResult<&[u8], u64> {
+fn parse_hex(input: &[u8]) -> IResult<&[u8], u64> {
     map_res(
         take_while(|x: u8| x.is_ascii_hexdigit()),
         // ideally we shouldn't need to convert ot &str first but...
@@ -117,7 +117,7 @@ fn parse_hex<'a>(input: &[u8]) -> IResult<&[u8], u64> {
     ).parse(input)
 }
 
-fn parse_permissions<'a>(input: &[u8]) -> IResult<&[u8], PermissionSet> {
+fn parse_permissions(input: &[u8]) -> IResult<&[u8], PermissionSet> {
     let rwx_parser = (parse_read_perm,
         parse_write_perm,
         parse_execute_perm);
@@ -127,32 +127,39 @@ fn parse_permissions<'a>(input: &[u8]) -> IResult<&[u8], PermissionSet> {
     ).parse(input)
 }
 
-fn parse_read_perm<'a>(input: &'a [u8]) -> IResult<&'a [u8], bool> {
+fn parse_read_perm(input: &[u8]) -> IResult<&[u8], bool> {
     alt(
         (value(true, tag(b"r".as_slice())), parse_empty_permission)
     ).parse(input)
 }
 
-fn parse_write_perm<'a>(input: &'a [u8]) -> IResult<&'a [u8], bool> {
+fn parse_write_perm(input: &[u8]) -> IResult<&[u8], bool> {
     alt(
         (value(true, tag(b"w".as_slice())), parse_empty_permission)
     ).parse(input)
 }
 
-fn parse_execute_perm<'a>(input: &'a [u8]) -> IResult<&'a [u8], bool> {
+fn parse_execute_perm(input: &[u8]) -> IResult<&[u8], bool> {
     alt(
         (value(true, tag(b"x".as_slice())), parse_empty_permission)
     ).parse(input)
 }
 
-fn parse_empty_permission<'a>(input: &'a [u8]) -> IResult<&'a [u8], bool> {
+fn parse_empty_permission(input: &[u8]) -> IResult<&[u8], bool> {
     value(false, tag(b"-".as_slice())).parse(input)
 }
 
-// for string fields, or those whose value we'll just discard
-fn parse_field(input: &[u8]) -> IResult<&[u8], &[u8]> {
-    take_till(|x: u8| x.is_ascii_whitespace()).parse(input)
+fn parse_field_owned(input: &[u8]) -> IResult<&[u8], Vec<u8>> {
+    map(
+        take_till(|x: u8| x.is_ascii_whitespace()),
+        |s: &[u8]| s.to_vec(),
+    ).parse(input)
 }
+
+fn discard_field(input: &[u8]) -> IResult<&[u8], ()> {
+    map(take_till(|x: u8| x.is_ascii_whitespace()), |_s| ()).parse(input)
+}
+
 
 fn parse_whitespace(input: &[u8]) -> IResult<&[u8], ()> {
     map(take_while(|x: u8| x.is_ascii_whitespace()), |_s| ()).parse(input)
@@ -228,24 +235,24 @@ mod tests {
     fn parse_field_space() {
         let input = b"my_field ";
         assert_eq!(
-            parse_field(input.as_slice()),
-            Ok((b" ".as_slice(), b"my_field".as_slice())));
+            parse_field_owned(input.as_slice()),
+            Ok((b" ".as_slice(), b"my_field".to_vec())));
     }
 
     #[test]
     fn parse_field_newline() {
         let input = b"my_field\n";
         assert_eq!(
-            parse_field(input.as_slice()),
-            Ok((b"\n".as_slice(), b"my_field".as_slice())));
+            parse_field_owned(input.as_slice()),
+            Ok((b"\n".as_slice(), b"my_field".to_vec())));
     }
 
     #[test]
     fn parse_field_eof() {
         let input = b"01:02";
         assert_eq!(
-            parse_field(input.as_slice()),
-            Ok((b"".as_slice(), input.as_slice())));
+            parse_field_owned(input.as_slice()),
+            Ok((b"".as_slice(), input.to_vec())));
     }
 
     #[test]
@@ -259,7 +266,7 @@ mod tests {
                 write: false,
                 execute: false,
             },
-            path: b"/usr/bin/dbus-daemon",
+            path: b"/usr/bin/dbus-daemon".to_vec(),
         };
         assert_eq!(
             parse_single_line(input.as_slice()),
@@ -277,7 +284,7 @@ mod tests {
                 write: true,
                 execute: false,
             },
-            path: b"[heap]",
+            path: b"[heap]".to_vec(),
         };
         assert_eq!(
             parse_single_line(input.as_slice()),
@@ -299,7 +306,7 @@ b"35b1800000-35b1820000 r-xp 00000000 08:02 135522  /usr/lib64/ld-2.15.so
                 write: false,
                 execute: true,
             },
-            path: b"/usr/lib64/ld-2.15.so",
+            path: b"/usr/lib64/ld-2.15.so".to_vec(),
         };
         let entry2 = ProcMapEntry {
             start_addr: 0x35b1a1f000,
@@ -309,7 +316,7 @@ b"35b1800000-35b1820000 r-xp 00000000 08:02 135522  /usr/lib64/ld-2.15.so
                 write: false,
                 execute: false,
             },
-            path: b"/usr/lib64/ld-2.15.so",
+            path: b"/usr/lib64/ld-2.15.so".to_vec(),
         };
         let entry3 = ProcMapEntry {
             start_addr: 0x35b1a20000,
@@ -319,7 +326,7 @@ b"35b1800000-35b1820000 r-xp 00000000 08:02 135522  /usr/lib64/ld-2.15.so
                 write: true,
                 execute: false,
             },
-            path: b"/usr/lib64/ld-2.15.so",
+            path: b"/usr/lib64/ld-2.15.so".to_vec(),
         };
         assert_eq!(
             parse_proc_maps(input),
