@@ -28,7 +28,11 @@ use std::{
     },
 };
 
-use anyhow::Context;
+use anyhow::{
+    anyhow,
+    Context,
+};
+
 use nom::{
     branch::alt,
     bytes::complete::{
@@ -71,6 +75,12 @@ pub struct PermissionSet {
     read: bool,
     write: bool,
     execute: bool,
+}
+
+impl PermissionSet {
+    fn is_executable(&self) -> bool {
+        self.execute
+    }
 }
 
 impl From<(bool, bool, bool)> for PermissionSet {
@@ -150,6 +160,22 @@ impl<R:Read> Iterator for ProcMapParser<R> {
             Ok(entry) => Some(Ok(entry))
         }
     }
+}
+
+/// Returns the starting address of the first executable section corresponding
+/// to prog_name.
+pub fn get_text_section_start_addr(proc_maps_path: &str, prog_name: &[u8])
+        -> anyhow::Result<u64> {
+    let mut parser = ProcMapParser::from_path(proc_maps_path)?;
+    while let Some(res) = parser.next() {
+        let entry = res?;
+        if entry.perm.is_executable() && entry.path == prog_name {
+            return Ok(entry.start_addr);
+        }
+    }
+    Err(anyhow!(
+            "failed to find the starting address of .text section in file '{}'",
+            proc_maps_path))
 }
 
 fn parse_proc_maps_entry(input: &[u8])
