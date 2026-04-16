@@ -18,11 +18,13 @@ use std::{
     cell::Cell,
     collections::HashMap,
     default::Default,
+    fmt::Display,
     fs,
     io,
     ffi::{
         CStr,
     },
+    process,
 };
 
 use anyhow::Context;
@@ -33,7 +35,8 @@ use nix::{
     sys::{
         personality::{self, Persona},
         ptrace,
-        wait,
+        signal::{self, Signal},
+        wait::{self, WaitStatus},
     },
 };
 
@@ -81,29 +84,67 @@ fn child<S: AsRef<CStr>>(cmd: &CStr, argv: &[S], orig_persona: Persona) {
 
 fn parent(child_pid: Pid, child_path: &CStr) {
     println!("child PID: {}", child_pid);
-    // child should be sent a signal when calling execve()
-    wait::waitpid(child_pid, None)
-        .expect("waipid() failed!");
 
-    if let Err(e) = set_breakpoints(child_pid, child_path) {
-        // even on error, we want to wait for the child process.
-        eprintln!("failed to set breakpoint in child process: {}", e);
-        ptrace::cont(child_pid, None).expect("ptrace::cont() failed!");
-        wait::waitpid(child_pid, None).expect("waipid() failed!");
+    // child should have been sent a signal when calling execve()
+    parent_unwrap_error(
+        wait::waitpid(child_pid, None),
+        "waitpid() failed!",
+        child_pid);
+
+    let child_path_str = parent_unwrap_error(
+        child_path.to_str(),
+        "child path has invalid UTF-8",
+        child_pid);
+    let bin_data = parent_unwrap_error(
+        fs::read(child_path_str),
+        &format!("failed to read file {}", child_path_str),
+        child_pid);
+    let mut tracer = parent_unwrap_error(
+        Tracer::new(&bin_data, child_pid, child_path),
+        "failed to create tracer",
+        child_pid);
+
+    parent_unwrap_error(
+        tracer.set_fn_breakpoints(),
+        "failed to set breakpoints",
+        child_pid);
+
+    loop {
+        let child_terminated = parent_unwrap_error(
+            tracer.resume_child_proc(),
+            "failed to resume child process",
+            child_pid);
+        if child_terminated {
+            break;
+        }
     }
 
-    // TODO after setting breakpoints, we need to continuously:
-    // --> Call ptrace::cont
-    // --> Wait for child
-    // --> Check if the signal was a SIGTRAP or if child exited
-    //      --> If child exited, we're done.
-    //      --> Otherwise, restore the original instruction at breakpoint's
-    //      address, single-step it with ptrace, then re-insert the breakpoint
+    parent_unwrap_error(
+        ptrace::cont(child_pid, None),
+        "ptrace::cont() failed",
+        child_pid);
 
-    ptrace::cont(child_pid, None)
-        .expect("ptrace::cont() failed!");
-    wait::waitpid(child_pid, None)
-        .expect("waipid() failed!");
+    parent_unwrap_error(
+        wait::waitpid(child_pid, None),
+        "waitpid() failed!",
+        child_pid);
+}
+
+// kills the child process on error.
+fn parent_unwrap_error<V, E: Display>(
+    res: Result<V, E>,
+    msg: &str,
+    child_pid: Pid) -> V {
+
+    match res {
+        Ok(val) => val,
+        Err(e) => {
+            eprintln!("{}: {}", msg, e);
+            signal::kill(child_pid, Signal::SIGKILL)
+                .expect("failed to kill traced process");
+            process::exit(0)
+        },
+    }
 }
 
 /// data associated with a function in the child process
@@ -184,18 +225,40 @@ impl Tracer {
                     addr))?;
         Ok(original_instr)
     }
-}
 
-fn set_breakpoints(child_pid: Pid, child_path: &CStr) -> anyhow::Result<()> {
-    let child_path_str = child_path.to_str()
-        .context("child path has invalid UTF-8")?;
-    let bin_data = fs::read(child_path_str)
-        .context(format!("failed to read file {}", child_path_str))?;
-    let mut tracer = Tracer::new(&bin_data, child_pid, child_path)?;
-    tracer.set_fn_breakpoints()?;
-    Ok(())
-}
+    /// Resume child process, and if a breakpoint is run, single-step it.
+    /// Returns true if child process is still running, false if it terminated.
+    pub fn resume_child_proc(&self) -> anyhow::Result<bool> {
+        ptrace::cont(self.child_pid, None)
+            .context("PTRACE_CONT operation failed")?;
+        let wstatus = wait::waitpid(self.child_pid, None)
+            .context("waitpid() failed")?;
+        match wstatus {
+            WaitStatus::Exited(_, exit_code) => {
+                println!("child process exited with code {}", exit_code);
+                Ok(false)
+            },
+            WaitStatus::Signaled(_, sig, _) => {
+                println!("child process killed by signal {}", sig);
+                Ok(false)
+            },
+            WaitStatus::Stopped(_, Signal::SIGTRAP)
+            | WaitStatus::PtraceEvent(_, Signal::SIGTRAP, _) => {
+                // TODO log the function's name (or the address, for now)
+                self.single_step_breakpoint();
+                Ok(true)
+            },
+            _ => Ok(true)
+        }
+    }
 
+    /// Restores the original instruction at the breakpoint's address,
+    /// executes it, then reinserts the breakpoint.
+    fn single_step_breakpoint(&self) {
+        //TODO
+    }
+
+}
 
 // should only use async-safe functions: see signal-safety(7) for a list of them
 fn async_safe_die(msg: &[u8]) {
