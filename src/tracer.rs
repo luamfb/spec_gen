@@ -16,10 +16,11 @@
 
 use std::{
     cell::Cell,
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     default::Default,
     fmt::Display,
     fs,
+    hash::{Hash, Hasher},
     io,
     ffi::{
         CStr,
@@ -148,22 +149,32 @@ fn parent_unwrap_error<V, E: Display>(
 }
 
 /// data associated with a function in the child process
-#[derive(Default)]
+#[derive(Default, PartialEq, Eq)]
 struct FnData {
-    /// function's address, as reported by the 'DW_AT_low_pc' attribute.
-    /// None if unknown (likely a dynamic library function call).
-    pub addr: Option<u64>,
+    /// function's name
+    pub name: String,
     /// original instruction prior to setting breakpoint at the beginning of
     /// this function. None if the breakpoint haven't been set yet.
     pub original_instr: Cell<Option<c_long>>,
+}
+
+impl Hash for FnData {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.name.hash(state);
+    }
 }
 
 pub struct Tracer {
     /// beginning of child process's .text section
     text_section_addr: u64,
 
-    /// the function data for each function, indexed by their names.
-    fn_data_map: HashMap<String, FnData>,
+    /// the function data for each function, indexed by their addresses,
+    /// as reported by the 'DW_AT_low_pc' attribute
+    fn_data_per_addr: HashMap<u64, FnData>,
+
+    /// function data for functions whose address is unknown
+    /// (normally library calls)
+    fn_data_unknown_addr: HashSet<FnData>,
 
     /// Child process's PID
     child_pid: Pid,
@@ -179,34 +190,38 @@ impl Tracer {
         let debug_info = DebugInfo::new(&data)
             .context("failed to parse debug information from binary")?;
 
-        let fn_data_map = debug_info
+        let fn_name_addr = debug_info
             .get_all_func_name_and_addr()
-            .context("failed to retrieve function debugging information")?
-            .into_iter()
+            .context("failed to retrieve function debugging information")?;
+
+        let mut fn_data_per_addr = HashMap::new();
+        let mut fn_data_unknown_addr = HashSet::new();
+        for (name, maybe_addr) in fn_name_addr.into_iter() {
             // clone name instead of borrowing because debug_info will be
             // dropped after this function returns
-            .map(|(name, addr)| (name.to_owned(), FnData {addr, ..Default::default() }))
-            .collect::<HashMap<String, FnData>>();
+            let fn_data = FnData {name: name.to_owned(), ..Default::default() };
+            match maybe_addr {
+                None => { fn_data_unknown_addr.insert(fn_data); },
+                Some(addr) => { fn_data_per_addr.insert(addr, fn_data); },
+            };
+        }
 
         Ok(Tracer {
             text_section_addr,
-            fn_data_map,
+            fn_data_per_addr,
+            fn_data_unknown_addr,
             child_pid,
         })
     }
 
-    /// Set a breakpoint at the beginning of each function.
+    /// Set a breakpoint at the beginning of each function that has a known address.
     pub fn set_fn_breakpoints(&mut self) -> anyhow::Result<()> {
-        for (name, fn_data) in self.fn_data_map.iter() {
-            // if the function's address is None, it's likely a library call,
-            // where we couldn't place a breakpoint anyway.
-            if let Some(fn_addr) = fn_data.addr {
-                let addr = (self.text_section_addr + fn_addr) as *mut c_void;
-                println!("Setting breakpoint at function '{}', address '{:?}'",
-                    name, addr); //TODO a log file would be better
-                let original_instr = self.set_breakpoint_at(addr)?;
-                fn_data.original_instr.set(Some(original_instr));
-            }
+        for (fn_addr, fn_data) in self.fn_data_per_addr.iter() {
+            let addr = (self.text_section_addr + fn_addr) as *mut c_void;
+            println!("Setting breakpoint at function '{}', address '{:?}'",
+                fn_data.name, addr); //TODO a log file would be better
+            let original_instr = self.set_breakpoint_at(addr)?;
+            fn_data.original_instr.set(Some(original_instr));
         }
         Ok(())
     }
