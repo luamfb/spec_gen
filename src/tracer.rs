@@ -28,7 +28,10 @@ use std::{
     process,
 };
 
-use anyhow::Context;
+use anyhow::{
+    bail,
+    Context,
+};
 
 use nix::{
     libc::{self, c_long, c_void},
@@ -111,24 +114,14 @@ fn parent(child_pid: Pid, child_path: &CStr) {
         child_pid);
 
     loop {
-        let child_terminated = parent_unwrap_error(
+        let child_running = parent_unwrap_error(
             tracer.resume_child_proc(),
             "failed to resume child process",
             child_pid);
-        if child_terminated {
+        if !child_running {
             break;
         }
     }
-
-    parent_unwrap_error(
-        ptrace::cont(child_pid, None),
-        "ptrace::cont() failed",
-        child_pid);
-
-    parent_unwrap_error(
-        wait::waitpid(child_pid, None),
-        "waitpid() failed!",
-        child_pid);
 }
 
 // kills the child process on error.
@@ -241,7 +234,7 @@ impl Tracer {
         Ok(original_instr)
     }
 
-    /// Resume child process, and if a breakpoint is run, single-step it.
+    /// Resume child process, and if a breakpoint is hit, single-step it.
     /// Returns true if child process is still running, false if it terminated.
     pub fn resume_child_proc(&self) -> anyhow::Result<bool> {
         ptrace::cont(self.child_pid, None)
@@ -260,7 +253,7 @@ impl Tracer {
             WaitStatus::Stopped(_, Signal::SIGTRAP)
             | WaitStatus::PtraceEvent(_, Signal::SIGTRAP, _) => {
                 // TODO log the function's name (or the address, for now)
-                self.single_step_breakpoint();
+                self.single_step_breakpoint()?;
                 Ok(true)
             },
             _ => Ok(true)
@@ -269,8 +262,33 @@ impl Tracer {
 
     /// Restores the original instruction at the breakpoint's address,
     /// executes it, then reinserts the breakpoint.
-    fn single_step_breakpoint(&self) {
-        //TODO
+    fn single_step_breakpoint(&self) -> anyhow::Result<()> {
+        let regs = ptrace::getregs(self.child_pid)
+            .context("PTRACE_GETREGS operation failed")?;
+        let fn_addr = regs.rip - self.text_section_addr;
+        let addr = regs.rip as *mut c_void;
+
+        let fn_data = match self.fn_data_per_addr.get(&fn_addr) {
+            None => bail!("no function associated with address {}", fn_addr),
+            Some(data) => data,
+        };
+        let original_instr = match fn_data.original_instr.get() {
+            None => bail!("no original instruction saved for function {}",
+                fn_data.name),
+            Some(instr) => instr,
+        };
+
+        ptrace::write(self.child_pid, addr, original_instr)
+            .context(format!("failed to restore original instruction at function {}, address {:?}",
+                    fn_data.name, addr))?;
+
+        ptrace::step(self.child_pid, None)
+            .context(format!(
+                    "failed to single-step original instruction at function {}, address {:?}",
+                fn_data.name, addr))?;
+
+        self.set_breakpoint_at(addr)?;
+        Ok(())
     }
 
 }
