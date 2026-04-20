@@ -57,6 +57,7 @@ use crate::{
 
 // TODO other architectures
 const X86_BREAK_INSTR : c_long = 0xcc; // int 3
+const X86_BREAK_INSTR_SIZE : u64 = 1; // size in bytes
 
 pub fn fork_exec<S: AsRef<CStr>>(cmd: &CStr, argv: &[S]) {
     let orig_persona = personality::get()
@@ -167,8 +168,8 @@ pub struct Tracer {
     /// beginning of child process's .text section
     text_section_addr: u64,
 
-    /// the function data for each function, indexed by their addresses,
-    /// as reported by the 'DW_AT_low_pc' attribute
+    /// the function data for each function, indexed by their addresses
+    /// on the child process.
     fn_data_per_addr: HashMap<u64, FnData>,
 
     /// function data for functions whose address is unknown
@@ -201,7 +202,12 @@ impl Tracer {
             let fn_data = FnData {name: name.to_owned(), ..Default::default() };
             match maybe_addr {
                 None => { fn_data_unknown_addr.insert(fn_data); },
-                Some(addr) => { fn_data_per_addr.insert(addr, fn_data); },
+                Some(low_pc_addr) => {
+                    let addr = text_section_addr | low_pc_addr;
+                    debug!("associated function '{}' with address '{:#x}'",
+                        fn_data.name, addr);
+                    fn_data_per_addr.insert(addr, fn_data);
+                },
             };
         }
 
@@ -216,7 +222,7 @@ impl Tracer {
     /// Set a breakpoint at the beginning of each function that has a known address.
     pub fn set_fn_breakpoints(&mut self) -> anyhow::Result<()> {
         for (fn_addr, fn_data) in self.fn_data_per_addr.iter() {
-            let addr = (self.text_section_addr + fn_addr) as *mut c_void;
+            let addr = (*fn_addr) as *mut c_void;
             info!("Setting breakpoint at function '{}', address '{:?}'",
                 fn_data.name, addr);
             let original_instr = ptrace::read(self.child_pid, addr)
@@ -271,15 +277,17 @@ impl Tracer {
     fn single_step_breakpoint(&self) -> anyhow::Result<()> {
         let regs = ptrace::getregs(self.child_pid)
             .context("PTRACE_GETREGS operation failed")?;
-        let fn_addr = regs.rip - self.text_section_addr;
-        let addr = regs.rip as *mut c_void;
 
-        let fn_data = match self.fn_data_per_addr.get(&fn_addr) {
-            None => bail!("no function associated with address {}", fn_addr),
+        // note: in x86, RIP points to the address of the next instruction
+        // to be executed, so we need to subtract its size as well
+        let addr_u64 = regs.rip - X86_BREAK_INSTR_SIZE;
+        let addr = addr_u64 as *mut c_void;
+
+        let fn_data = match self.fn_data_per_addr.get(&addr_u64) {
+            None => bail!("no function associated with address {:x}", addr_u64),
             Some(data) => data,
         };
 
-        // FIXME never printed
         println!("{}()", fn_data.name);
 
         let original_instr = match fn_data.original_instr.get() {
@@ -290,12 +298,12 @@ impl Tracer {
 
         ptrace::write(self.child_pid, addr, original_instr)
             .context(format!("failed to restore original instruction at function {}, address {:?}",
-                    fn_data.name, addr))?;
+                    fn_data.name, addr_u64))?;
 
         ptrace::step(self.child_pid, None)
             .context(format!(
                     "failed to single-step original instruction at function {}, address {:?}",
-                fn_data.name, addr))?;
+                    fn_data.name, addr_u64))?;
 
         self.set_breakpoint_at(addr)?;
         Ok(())
