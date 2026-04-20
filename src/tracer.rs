@@ -219,30 +219,26 @@ impl Tracer {
             let addr = (self.text_section_addr + fn_addr) as *mut c_void;
             info!("Setting breakpoint at function '{}', address '{:?}'",
                 fn_data.name, addr);
-            let original_instr = self.set_breakpoint_at(addr)?;
+            let original_instr = ptrace::read(self.child_pid, addr)
+                .context(format!("failed to read instruction from address {:?}",
+                        addr))?;
+            debug!("original instruction at {:?} is {:#x}",
+                addr, original_instr);
+
+            self.set_breakpoint_at(addr)?;
             fn_data.original_instr.set(Some(original_instr));
         }
         Ok(())
     }
 
-    /// Set a breakpoint at a given address, returning the original
-    /// instruction(s) at that address.
-    fn set_breakpoint_at(&self, addr: *mut c_void) -> anyhow::Result<c_long> {
-        let original_instr = ptrace::read(self.child_pid, addr)
-            .context(format!("failed to read instruction from address {:?}",
-                    addr))?;
-
-        debug!("original instruction at {:?} is {:#x}, overwriting with {:#x}",
-            addr,
-            original_instr,
-            X86_BREAK_INSTR);
-
+    /// Set a breakpoint at a given address.
+    fn set_breakpoint_at(&self, addr: *mut c_void) -> anyhow::Result<()> {
         // TODO verify which architecture we're running at and choose
         // the instruction accordingly
         ptrace::write(self.child_pid, addr, X86_BREAK_INSTR)
             .context(format!("failed to write breakpoint instruction at {:?}",
                     addr))?;
-        Ok(original_instr)
+        Ok(())
     }
 
     /// Resume child process, and if a breakpoint is hit, single-step it.
