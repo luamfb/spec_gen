@@ -62,6 +62,10 @@ use nom::{
     Parser,
 };
 
+use log::{
+    info,
+};
+
 #[derive(Debug, PartialEq, Eq)]
 pub struct ProcMapEntry {
     start_addr: u64,
@@ -170,7 +174,9 @@ pub fn get_text_section_start_addr(proc_maps_path: &str, prog_name: &[u8])
     while let Some(res) = parser.next() {
         let entry = res?;
         if entry.perm.is_executable() && entry.path == prog_name {
-            return Ok(entry.start_addr);
+            let addr = entry.start_addr;
+            info!("start of .text section found at {:#x}", addr);
+            return Ok(addr);
         }
     }
     Err(anyhow!(

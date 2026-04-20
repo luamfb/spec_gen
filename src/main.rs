@@ -31,26 +31,11 @@ use crate::{
     debug_info::DebugInfo,
 };
 
-fn dump_prog_functions(filename: &str) {
-    let data = fs::read(filename).expect("failed to read file");
-    let debug_info = DebugInfo::new(&data).expect("failed to get debug info");
-    let func_name_addr = debug_info.get_all_func_name_and_addr()
-        .expect("get_all_func_name_offset() failed");
-    println!("=== function dump begin ===");
-    for (name, addr) in func_name_addr.iter() {
-        println!("name: '{}', address: '{:x?}'", name, addr);
-    }
-    println!("=== function dump end ===");
-}
-
 fn main() {
+    env_logger::init();
+
     let mut cli = Cli::parse();
     cli.args.insert(0, cli.cmd.clone()); // use command name as argv[0]
-
-    dump_prog_functions(
-        cli.cmd
-        .to_str()
-        .expect("failed to convert name to &str"));
 
     tracer::fork_exec(&cli.cmd, &cli.args);
 }

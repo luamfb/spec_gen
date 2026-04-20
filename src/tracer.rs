@@ -33,6 +33,12 @@ use anyhow::{
     Context,
 };
 
+use log::{
+    info,
+    debug,
+    error,
+};
+
 use nix::{
     libc::{self, c_long, c_void},
     unistd::{self, ForkResult, Pid},
@@ -87,7 +93,7 @@ fn child<S: AsRef<CStr>>(cmd: &CStr, argv: &[S], orig_persona: Persona) {
 }
 
 fn parent(child_pid: Pid, child_path: &CStr) {
-    println!("child PID: {}", child_pid);
+    info!("child PID: {}", child_pid);
 
     // child should have been sent a signal when calling execve()
     parent_unwrap_error(
@@ -133,7 +139,7 @@ fn parent_unwrap_error<V, E: Display>(
     match res {
         Ok(val) => val,
         Err(e) => {
-            eprintln!("{}: {}", msg, e);
+            error!("{}: {}", msg, e);
             signal::kill(child_pid, Signal::SIGKILL)
                 .expect("failed to kill traced process");
             process::exit(0)
@@ -211,8 +217,8 @@ impl Tracer {
     pub fn set_fn_breakpoints(&mut self) -> anyhow::Result<()> {
         for (fn_addr, fn_data) in self.fn_data_per_addr.iter() {
             let addr = (self.text_section_addr + fn_addr) as *mut c_void;
-            println!("Setting breakpoint at function '{}', address '{:?}'",
-                fn_data.name, addr); //TODO a log file would be better
+            info!("Setting breakpoint at function '{}', address '{:?}'",
+                fn_data.name, addr);
             let original_instr = self.set_breakpoint_at(addr)?;
             fn_data.original_instr.set(Some(original_instr));
         }
@@ -225,6 +231,11 @@ impl Tracer {
         let original_instr = ptrace::read(self.child_pid, addr)
             .context(format!("failed to read instruction from address {:?}",
                     addr))?;
+
+        debug!("original instruction at {:?} is {:#x}, overwriting with {:#x}",
+            addr,
+            original_instr,
+            X86_BREAK_INSTR);
 
         // TODO verify which architecture we're running at and choose
         // the instruction accordingly
@@ -243,16 +254,15 @@ impl Tracer {
             .context("waitpid() failed")?;
         match wstatus {
             WaitStatus::Exited(_, exit_code) => {
-                println!("child process exited with code {}", exit_code);
+                info!("child process exited with code {}", exit_code);
                 Ok(false)
             },
             WaitStatus::Signaled(_, sig, _) => {
-                println!("child process killed by signal {}", sig);
+                info!("child process killed by signal {}", sig);
                 Ok(false)
             },
             WaitStatus::Stopped(_, Signal::SIGTRAP)
             | WaitStatus::PtraceEvent(_, Signal::SIGTRAP, _) => {
-                // TODO log the function's name (or the address, for now)
                 self.single_step_breakpoint()?;
                 Ok(true)
             },
@@ -272,6 +282,10 @@ impl Tracer {
             None => bail!("no function associated with address {}", fn_addr),
             Some(data) => data,
         };
+
+        // FIXME never printed
+        println!("{}()", fn_data.name);
+
         let original_instr = match fn_data.original_instr.get() {
             None => bail!("no original instruction saved for function {}",
                 fn_data.name),

@@ -31,6 +31,9 @@ use gimli::{
     Unit,
 };
 use object::{Object, ObjectSection};
+use log::{
+    debug,
+};
 
 pub struct DebugInfo<'a> {
     obj: object::File<'a>,
@@ -88,6 +91,8 @@ impl<'a> DebugInfo<'a> {
                 if entry.tag() == gimli::DW_TAG_subprogram {
                     if let Some(name) = self.entry_name(&unit, &entry) {
                         let opt_low_pc_addr = self.entry_low_pc(&entry);
+                        debug!("got function data from debug info: name = {}, addr = {:x?}",
+                            name, opt_low_pc_addr);
                         retval.push((name, opt_low_pc_addr));
                     }
                 }
