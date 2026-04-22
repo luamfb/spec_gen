@@ -37,6 +37,7 @@ use log::{
     info,
     debug,
     error,
+    warn,
 };
 
 use nix::{
@@ -250,6 +251,7 @@ impl Tracer {
     /// Resume child process, and if a breakpoint is hit, single-step it.
     /// Returns true if child process is still running, false if it terminated.
     pub fn resume_child_proc(&self) -> anyhow::Result<bool> {
+        debug!("continuing child process");
         ptrace::cont(self.child_pid, None)
             .context("PTRACE_CONT operation failed")?;
         let wstatus = wait::waitpid(self.child_pid, None)
@@ -265,10 +267,43 @@ impl Tracer {
             },
             WaitStatus::Stopped(_, Signal::SIGTRAP)
             | WaitStatus::PtraceEvent(_, Signal::SIGTRAP, _) => {
+                info!("child process stopped with SIGTRAP");
                 self.single_step_breakpoint()?;
                 Ok(true)
             },
-            _ => Ok(true)
+            WaitStatus::Stopped(_, sig)
+            | WaitStatus::PtraceEvent(_, sig, _) => {
+                match sig {
+                    Signal::SIGSEGV
+                    | Signal::SIGTERM
+                    | Signal::SIGINT
+                    | Signal::SIGQUIT
+                    | Signal::SIGABRT
+                    | Signal::SIGILL => {
+                        error!("child stopped by fatal signal {}", sig);
+                        // pass the signal onto the child process so it may
+                        // produce a core dump if required
+                        if let Err(e) = signal::kill(self.child_pid, sig) {
+                            warn!("failed to send signal {} to child: '{:?}'",
+                                sig, e);
+                        }
+                        Ok(false)
+                    },
+                    _ => {
+                        info!("child stopped by non-fatal signal {}", sig);
+                        Ok(true)
+                    },
+                }
+            },
+            WaitStatus::Continued(_) => {
+                warn!("waitpid() should not have reported 'Continued' status");
+                Ok(true)
+            },
+            WaitStatus::StillAlive => {
+                warn!("waitpid() should not have reported 'StillAlive' status");
+                Ok(true)
+            },
+            _ => Ok(true),
         }
     }
 
