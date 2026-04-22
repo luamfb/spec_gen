@@ -283,6 +283,8 @@ impl Tracer {
         let addr_u64 = regs.rip - X86_BREAK_INSTR_SIZE;
         let addr = addr_u64 as *mut c_void;
 
+        debug!("single-stepping breakpoint at address {:#x}", addr_u64);
+
         let fn_data = match self.fn_data_per_addr.get(&addr_u64) {
             None => bail!("no function associated with address {:x}", addr_u64),
             Some(data) => data,
@@ -304,11 +306,26 @@ impl Tracer {
             .context(format!(
                     "failed to single-step original instruction at function {}, address {:?}",
                     fn_data.name, addr_u64))?;
+        // PTRACE_SINGLESTEP should stop to the child with a SIGTRAP:
+        // wait for the signal to arrive
+        let wstatus = wait::waitpid(self.child_pid, None)
+            .context("failed to wait for child process")?;
+        match wstatus {
+            WaitStatus::Stopped(_, sig) => {
+                info!("child stopped by signal {} after PTRACE_SINGLESTEP",
+                    sig);
+            },
+            WaitStatus::PtraceEvent(_, Signal::SIGSTOP, _) => {
+                info!("child stopped with SIGSTOP by ptrace event after PTRACE_SINGLESTEP");
+            },
+            _ => {
+                error!("child not stopped after PTRACE_SINGLESTEP");
+            },
+        };
 
         self.set_breakpoint_at(addr)?;
         Ok(())
     }
-
 }
 
 // should only use async-safe functions: see signal-safety(7) for a list of them
