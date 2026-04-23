@@ -232,17 +232,32 @@ impl Tracer {
             debug!("original instruction at {:?} is {:#x}",
                 addr, original_instr);
 
-            self.set_breakpoint_at(addr)?;
+            self.set_breakpoint_at(addr, original_instr)?;
             fn_data.original_instr.set(Some(original_instr));
         }
         Ok(())
     }
 
     /// Set a breakpoint at a given address.
-    fn set_breakpoint_at(&self, addr: *mut c_void) -> anyhow::Result<()> {
+    /// `original_instr` are the original instructions at this address.
+    fn set_breakpoint_at(&self, addr: *mut c_void, original_instr: c_long)
+            -> anyhow::Result<()> {
         // TODO verify which architecture we're running at and choose
         // the instruction accordingly
-        ptrace::write(self.child_pid, addr, X86_BREAK_INSTR)
+        let break_instr = X86_BREAK_INSTR;
+        let break_instr_size = X86_BREAK_INSTR_SIZE;
+
+        // since the architecture is little endian, we want to zero out the
+        // N least significant bytes, where N is the size of the breakpoint
+        // instruction in bytes.
+        //
+        let mask = -((break_instr_size as i64) << 8);
+        let instr_with_bp = (original_instr & mask) | break_instr;
+
+        debug!("Setting breakpoint: writing value {:#x} at {:?}",
+            instr_with_bp, addr);
+
+        ptrace::write(self.child_pid, addr, instr_with_bp)
             .context(format!("failed to write breakpoint instruction at {:?}",
                     addr))?;
         Ok(())
@@ -358,7 +373,7 @@ impl Tracer {
             },
         };
 
-        self.set_breakpoint_at(addr)?;
+        self.set_breakpoint_at(addr, original_instr)?;
         Ok(())
     }
 }
