@@ -33,11 +33,20 @@ use gimli::{
 use object::{Object, ObjectSection};
 use log::{
     debug,
+    info,
 };
 
 pub struct DebugInfo<'a> {
     obj: object::File<'a>,
     dwarf: Dwarf<EndianSlice<'a, RunTimeEndian>>,
+}
+
+#[derive(Default, Clone, PartialEq, Eq)]
+pub struct DebugEntryData<'a> {
+    pub name: &'a str,
+    pub addr: Option<u64>,
+    // TODO we also need their location
+    pub params: Vec<&'a str>,
 }
 
 type EntryType<'a> = DebuggingInformationEntry<EndianSlice<'a, RunTimeEndian>, usize>;
@@ -78,27 +87,69 @@ impl<'a> DebugInfo<'a> {
     }
 
     pub fn get_all_func_name_and_addr(&self)
-            -> anyhow::Result<Vec<(&str, Option<u64>)>> {
-        let mut retval = Vec::new();
+            -> anyhow::Result<Vec<DebugEntryData<'a>>> {
+        let mut entries_data = Vec::new();
+        let mut cur_entry_data = DebugEntryData::default();
         for header in self.dwarf.units() {
             let header = header
                 .context("failed to get DWARF unit header")?;
             let unit = self.dwarf.unit(header)
                 .context("failed to construct DWARF unit from header")?;
-            let mut entries = unit.entries();
-            while let Some(entry) = entries.next_dfs()
-                    .context("failed to get debugging information entry")? {
-                if entry.tag() == gimli::DW_TAG_subprogram {
+            self.parse_entries(&unit, &mut entries_data, &mut cur_entry_data)?;
+        }
+        Ok(entries_data)
+    }
+
+    fn parse_entries(&self,
+        unit: &UnitType<'a>,
+        entries_data: &mut Vec<DebugEntryData<'a>>,
+        cur_entry_data: &mut DebugEntryData<'a>) -> anyhow::Result<()> {
+
+        let mut entries = unit.entries();
+        let mut inside_fn_subtree = false;
+
+        while let Some(entry) = entries.next_dfs()
+            .context("failed to get debugging information entry")? {
+            if entry.tag() == gimli::DW_TAG_subprogram {
+                Self::finish_entry(entries_data, cur_entry_data);
+                let name = match self.entry_name(&unit, &entry) {
+                    None => {
+                        info!("function without a name found in debug info; skipping");
+                        continue;
+                    },
+                    Some(s) => s,
+                };
+
+                inside_fn_subtree = true;
+
+                let opt_low_pc_addr = self.entry_low_pc(&entry);
+                debug!("got function data from debug info: name = {}, addr = {:x?}",
+                    name, opt_low_pc_addr);
+                cur_entry_data.name = name;
+                cur_entry_data.addr = opt_low_pc_addr;
+            } else if inside_fn_subtree
+                && entry.tag() == gimli::DW_TAG_formal_parameter {
                     if let Some(name) = self.entry_name(&unit, &entry) {
-                        let opt_low_pc_addr = self.entry_low_pc(&entry);
-                        debug!("got function data from debug info: name = {}, addr = {:x?}",
-                            name, opt_low_pc_addr);
-                        retval.push((name, opt_low_pc_addr));
+                        debug!("found parameter name: {}", name);
+                        cur_entry_data.params.push(name);
                     }
-                }
+            } else {
+                inside_fn_subtree = false;
+                Self::finish_entry(entries_data, cur_entry_data);
             }
         }
-        Ok(retval)
+        Self::finish_entry(entries_data, cur_entry_data);
+        Ok(())
+    }
+
+    fn finish_entry(entries_data: &mut Vec<DebugEntryData<'a>>,
+        cur_entry_data: &mut DebugEntryData<'a>) {
+        if *cur_entry_data != DebugEntryData::default() {
+            // this clone() call is just here to make the borrow checker
+            // happy, since we'll overwrite cur_entry_data immediately
+            entries_data.push(cur_entry_data.clone());
+            *cur_entry_data = DebugEntryData::default();
+        }
     }
 
     pub fn entry_name(&self, unit: &UnitType<'a>, entry: &EntryType<'a>)

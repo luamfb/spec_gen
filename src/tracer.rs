@@ -191,17 +191,20 @@ impl Tracer {
         let debug_info = DebugInfo::new(&data)
             .context("failed to parse debug information from binary")?;
 
-        let fn_name_addr = debug_info
+        let fn_debug_data = debug_info
             .get_all_func_name_and_addr()
             .context("failed to retrieve function debugging information")?;
 
         let mut fn_data_per_addr = HashMap::new();
         let mut fn_data_unknown_addr = HashSet::new();
-        for (name, maybe_addr) in fn_name_addr.into_iter() {
+        for entry_data in fn_debug_data.into_iter() {
             // clone name instead of borrowing because debug_info will be
             // dropped after this function returns
-            let fn_data = FnData {name: name.to_owned(), ..Default::default() };
-            match maybe_addr {
+            let fn_data = FnData {
+                name: entry_data.name.to_owned(),
+                // TODO add function parameters as well
+                ..Default::default() };
+            match entry_data.addr {
                 None => { fn_data_unknown_addr.insert(fn_data); },
                 Some(low_pc_addr) => {
                     let addr = text_section_addr | low_pc_addr;
@@ -340,6 +343,7 @@ impl Tracer {
             Some(data) => data,
         };
 
+        // TODO print function parameters and local vars as well
         println!("{}()", fn_data.name);
 
         let original_instr = match fn_data.original_instr.get() {
