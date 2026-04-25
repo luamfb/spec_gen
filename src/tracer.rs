@@ -157,6 +157,8 @@ struct FnData {
     /// original instruction prior to setting breakpoint at the beginning of
     /// this function. None if the breakpoint haven't been set yet.
     pub original_instr: Cell<Option<c_long>>,
+    /// the function's parameters
+    pub params: Vec<String>,
 }
 
 impl Hash for FnData {
@@ -202,7 +204,7 @@ impl Tracer {
             // dropped after this function returns
             let fn_data = FnData {
                 name: entry_data.name.to_owned(),
-                // TODO add function parameters as well
+                params: entry_data.params.iter().map(|s| String::from(*s)).collect(),
                 ..Default::default() };
             match entry_data.addr {
                 None => { fn_data_unknown_addr.insert(fn_data); },
@@ -343,8 +345,12 @@ impl Tracer {
             Some(data) => data,
         };
 
-        // TODO print function parameters and local vars as well
-        println!("{}()", fn_data.name);
+        // TODO print function parameters' values and local vars as well
+        print!("{}(", fn_data.name);
+        for s in fn_data.params.iter() {
+            print!("{},", s);
+        }
+        println!(")");
 
         let original_instr = match fn_data.original_instr.get() {
             None => bail!("no original instruction saved for function {}",
