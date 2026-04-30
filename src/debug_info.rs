@@ -75,6 +75,10 @@ impl<'a> DebugInfo<'a> {
         })
     }
 
+    pub fn get_architecture(&self) -> object::Architecture {
+        self.obj.architecture()
+    }
+
     pub fn dump_sections<F: io::Write + Debug>(&self, file: &mut F)
             -> anyhow::Result<()> {
         for section in self.obj.sections() {

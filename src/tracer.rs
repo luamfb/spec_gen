@@ -167,7 +167,17 @@ impl Hash for FnData {
     }
 }
 
+/// Currently supported architectures.
+#[derive(Debug)]
+enum Architecture {
+    X86_64,
+    I386,
+}
+
 pub struct Tracer {
+    /// architecture of the binary being analyzed.
+    arch: Architecture,
+
     /// beginning of child process's .text section
     text_section_addr: u64,
 
@@ -192,6 +202,13 @@ impl Tracer {
 
         let debug_info = DebugInfo::new(&data)
             .context("failed to parse debug information from binary")?;
+
+        let arch = match debug_info.get_architecture() {
+            object::Architecture::X86_64 => Architecture::X86_64,
+            object::Architecture::I386 => Architecture::I386,
+            unk_arch => bail!("unsupported CPU architecture {:?}", unk_arch),
+        };
+        debug!("Program's CPU architecture: {:?}", arch);
 
         let fn_debug_data = debug_info
             .get_all_func_name_and_addr()
@@ -218,6 +235,7 @@ impl Tracer {
         }
 
         Ok(Tracer {
+            arch,
             text_section_addr,
             fn_data_per_addr,
             fn_data_unknown_addr,
