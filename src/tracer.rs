@@ -363,12 +363,7 @@ impl Tracer {
             Some(data) => data,
         };
 
-        // TODO print function parameters' values and local vars as well
-        print!("{}(", fn_data.name);
-        for s in fn_data.params.iter() {
-            print!("{},", s);
-        }
-        println!(")");
+        self.print_fn_call(&fn_data)?;
 
         let original_instr = match fn_data.original_instr.get() {
             None => bail!("no original instruction saved for function {}",
@@ -403,6 +398,48 @@ impl Tracer {
 
         self.set_breakpoint_at(addr, original_instr)?;
         Ok(())
+    }
+
+    fn print_fn_call(&self, fn_data: &FnData) -> anyhow::Result<()> {
+        // TODO print local vars as well
+
+        let regs = ptrace::getregs(self.child_pid)
+            .context("PTRACE_GETREGS operation failed")?;
+
+        print!("{}(", fn_data.name);
+        for (i, param_name) in fn_data.params.iter().enumerate() {
+            print!("{}", param_name);
+            match self.arch {
+                Architecture::X86_64 => {
+                    // FIXME check if argument is a floating-point value first:
+                    // those are located in different registers
+                    if let Some(val) = unix_x86_64_call_conv_nth_reg(&regs, i) {
+                        print!("= {},", val);
+                    } else {
+                        print!(", ");
+                    }
+                },
+                Architecture::I386 => {
+                    // TODO get arguments from stack
+                    print!(", ");
+                },
+            };
+        }
+        println!(")");
+        Ok(())
+    }
+}
+
+fn unix_x86_64_call_conv_nth_reg(regs: &libc::user_regs_struct, n: usize)
+        -> Option<libc::c_ulonglong> {
+    match n {
+        0 => Some(regs.rdi),
+        1 => Some(regs.rsi),
+        2 => Some(regs.rdx),
+        3 => Some(regs.rcx),
+        4 => Some(regs.r8),
+        5 => Some(regs.r9),
+        _ => None,
     }
 }
 
