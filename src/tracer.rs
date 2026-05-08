@@ -53,7 +53,7 @@ use nix::{
 
 use crate::{
     proc_maps,
-    debug_info::DebugInfo,
+    debug_info::{DebugInfo, VarLocation},
 };
 
 // TODO other architectures
@@ -157,8 +157,8 @@ struct FnData {
     /// original instruction prior to setting breakpoint at the beginning of
     /// this function. None if the breakpoint haven't been set yet.
     pub original_instr: Cell<Option<c_long>>,
-    /// the function's parameters
-    pub params: Vec<String>,
+    /// the function's parameters and their location
+    pub params: Vec<(String, VarLocation)>,
 }
 
 impl Hash for FnData {
@@ -211,8 +211,7 @@ impl Tracer {
         debug!("Program's CPU architecture: {:?}", arch);
 
         let fn_debug_data = debug_info
-            .get_all_func_name_and_addr()
-            .context("failed to retrieve function debugging information")?;
+            .get_all_func_name_and_addr()?;
 
         let mut fn_data_per_addr = HashMap::new();
         let mut fn_data_unknown_addr = HashSet::new();
@@ -221,7 +220,9 @@ impl Tracer {
             // dropped after this function returns
             let fn_data = FnData {
                 name: entry_data.name.to_owned(),
-                params: entry_data.params.iter().map(|s| String::from(*s)).collect(),
+                params: entry_data.params.iter()
+                    .map(|&(name, loc)| (name.to_owned(), loc))
+                    .collect(),
                 ..Default::default() };
             match entry_data.addr {
                 None => { fn_data_unknown_addr.insert(fn_data); },
@@ -407,7 +408,7 @@ impl Tracer {
             .context("PTRACE_GETREGS operation failed")?;
 
         print!("{}(", fn_data.name);
-        for (i, param_name) in fn_data.params.iter().enumerate() {
+        for (i, (param_name, param_loc)) in fn_data.params.iter().enumerate() {
             print!("{}", param_name);
             match self.arch {
                 Architecture::X86_64 => {

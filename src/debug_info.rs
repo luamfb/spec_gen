@@ -21,11 +21,17 @@ use std::{
     default::Default,
 };
 
-use anyhow::Context;
+use anyhow::{
+    anyhow,
+    bail,
+    Context,
+};
 use gimli::{
+    constants,
     AttributeValue,
     DebuggingInformationEntry,
     Dwarf,
+    EntriesCursor,
     EndianSlice,
     RunTimeEndian,
     Unit,
@@ -34,6 +40,7 @@ use object::{Object, ObjectSection};
 use log::{
     debug,
     info,
+    warn,
 };
 
 pub struct DebugInfo<'a> {
@@ -41,14 +48,23 @@ pub struct DebugInfo<'a> {
     dwarf: Dwarf<EndianSlice<'a, RunTimeEndian>>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VarLocation {
+    /// general purpose registers
+    Register,
+    /// for floating-point values in x86
+    SseRegister,
+    // TODO add memory locations
+}
+
 #[derive(Default, Clone, PartialEq, Eq)]
 pub struct DebugEntryData<'a> {
     pub name: &'a str,
     pub addr: Option<u64>,
-    // TODO we also need their location
-    pub params: Vec<&'a str>,
+    pub params: Vec<(&'a str, VarLocation)>,
 }
 
+type ReaderType<'a> = EndianSlice<'a, RunTimeEndian>;
 type EntryType<'a> = DebuggingInformationEntry<EndianSlice<'a, RunTimeEndian>, usize>;
 type UnitType<'a> = Unit<EndianSlice<'a, RunTimeEndian>, usize>;
 
@@ -135,7 +151,9 @@ impl<'a> DebugInfo<'a> {
                 && entry.tag() == gimli::DW_TAG_formal_parameter {
                     if let Some(name) = self.entry_name(&unit, &entry) {
                         debug!("found parameter name: {}", name);
-                        cur_entry_data.params.push(name);
+                        let param_loc = self.entry_location(&unit, &entry)?;
+                        debug!("found parameter location: {:?}", param_loc);
+                        cur_entry_data.params.push((name, param_loc));
                     }
             } else {
                 inside_fn_subtree = false;
@@ -184,4 +202,66 @@ impl<'a> DebugInfo<'a> {
         None
     }
 
+    // get entry's location.
+    fn entry_location(&self, unit: &UnitType<'a>, entry: &EntryType<'a>)
+            -> anyhow::Result<VarLocation> {
+        for attr in entry.attrs.iter() {
+            // in x86-64, we need the entry's type to determine if it goes in
+            // a general purpose register or an SSE one.
+            // TODO get memory locations in i386
+            if attr.name() == constants::DW_AT_type {
+                let type_entry = self.resolve_ref_to_entry(unit, &attr.value())?;
+                debug!("entry's type has tag {}", type_entry.tag());
+                if type_entry.tag() == constants::DW_TAG_pointer_type {
+                    debug!("entry has pointer type");
+                    return Ok(VarLocation::Register);
+                } else {
+                    for attr in type_entry.attrs.iter() {
+                        if let AttributeValue::Encoding(enc) = attr.value() {
+                            debug!("entry has attribute DW_AT_encoding = '{}'",
+                                enc);
+                            let loc = match enc {
+                                constants::DW_ATE_float
+                                | constants::DW_ATE_imaginary_float
+                                | constants::DW_ATE_complex_float =>
+                                    VarLocation::SseRegister,
+                                _ => VarLocation::Register,
+                            };
+                            return Ok(loc);
+                        }
+                    }
+                }
+            }
+        }
+        return Err(anyhow!("failed to find entry's location"));
+    }
+
+    // resolves an AttibuteValue that is a reference to another
+    // debugging information entry.
+    fn resolve_ref_to_entry(&self,
+        unit: &UnitType<'a>,
+        attr_val: &AttributeValue<ReaderType<'a>>)
+            -> anyhow::Result<EntryType<'a>> {
+        let ref_entry_offset = match attr_val {
+            AttributeValue::UnitRef(offset) => *offset,
+            AttributeValue::DebugInfoRef(offset) => offset
+                .to_unit_offset(unit)
+                .context("failed to convert .debug_info reference to unit reference")?,
+            unk => bail!("unknown offset {:?} in debug info", unk),
+        };
+        let mut ref_entry_cursor = unit
+            .entries_at_offset(ref_entry_offset)
+            .context(format!("failed to get debug info entry cursor at offset {:?}",
+                    ref_entry_offset))?;
+        ref_entry_cursor.next_entry()
+            .context("failed to move entry cursor to first entry")?;
+
+        let ref_entry = ref_entry_cursor
+            .current()
+            .context(format!("failed to get debug info entry at offset {:?}",
+                    ref_entry_offset))?;
+        // cloning here is not ideal, but the data from ref_entry_cursor
+        // will be dropped after this function returns
+        Ok(ref_entry.clone())
+    }
 }
