@@ -45,7 +45,7 @@ use nix::{
     unistd::{self, ForkResult, Pid},
     sys::{
         personality::{self, Persona},
-        ptrace,
+        ptrace::{self, regset},
         signal::{self, Signal},
         wait::{self, WaitStatus},
     },
@@ -404,20 +404,39 @@ impl Tracer {
     fn print_fn_call(&self, fn_data: &FnData) -> anyhow::Result<()> {
         // TODO print local vars as well
 
-        let regs = ptrace::getregs(self.child_pid)
+        let general_regs = ptrace::getregs(self.child_pid)
             .context("PTRACE_GETREGS operation failed")?;
 
+        let float_regs = ptrace::getregset::<regset::NT_PRFPREG>(
+            self.child_pid)
+            .context("PTRACE_GETREGSET operation failed")?;
+
+        // number of the next available general purpose register
+        let mut general_reg_index = 0;
+        // same, for floating-point registers
+        let mut float_reg_index = 0;
         print!("{}(", fn_data.name);
-        for (i, (param_name, param_loc)) in fn_data.params.iter().enumerate() {
+        for (param_name, param_loc) in fn_data.params.iter() {
             print!("{}", param_name);
             match self.arch {
                 Architecture::X86_64 => {
-                    // FIXME check if argument is a floating-point value first:
-                    // those are located in different registers
-                    if let Some(val) = unix_x86_64_call_conv_nth_reg(&regs, i) {
-                        print!("= {},", val);
+                    let is_floating = match param_loc {
+                        VarLocation::Register => false,
+                        VarLocation::SseRegister => true,
+                    };
+                    if is_floating {
+                        match float_regs.xmm_space.get(float_reg_index) {
+                            Some(val) => print!(" = {},", f32::from_bits(*val)),
+                            None => print!(", "),
+                        };
+                        float_reg_index += 1;
                     } else {
-                        print!(", ");
+                        match unix_x86_64_call_conv_nth_reg(
+                                &general_regs, general_reg_index) {
+                            Some(val) => print!(" = {},", val),
+                            None => print!(", "),
+                        };
+                        general_reg_index += 1;
                     }
                 },
                 Architecture::I386 => {
