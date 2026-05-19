@@ -216,13 +216,9 @@ impl Tracer {
         let mut fn_data_per_addr = HashMap::new();
         let mut fn_data_unknown_addr = HashSet::new();
         for entry_data in fn_debug_data.into_iter() {
-            // clone name instead of borrowing because debug_info will be
-            // dropped after this function returns
             let fn_data = FnData {
-                name: entry_data.name.to_owned(),
-                params: entry_data.params.iter()
-                    .map(|&(name, loc)| (name.to_owned(), loc))
-                    .collect(),
+                name: entry_data.name,
+                params: entry_data.params.into_iter().collect(),
                 ..Default::default() };
             match entry_data.addr {
                 None => { fn_data_unknown_addr.insert(fn_data); },

@@ -15,10 +15,12 @@
 // with spec_gen. If not, see <https://www.gnu.org/licenses/>.
 
 use std::{
+    borrow::Cow,
     io,
     fmt::Debug,
     error::Error,
     default::Default,
+    rc::Rc,
 };
 
 use anyhow::{
@@ -32,8 +34,9 @@ use gimli::{
     DebuggingInformationEntry,
     Dwarf,
     EntriesCursor,
-    EndianSlice,
+    EndianRcSlice,
     RunTimeEndian,
+    Reader,
     Unit,
 };
 use object::{Object, ObjectSection};
@@ -45,7 +48,7 @@ use log::{
 
 pub struct DebugInfo<'a> {
     obj: object::File<'a>,
-    dwarf: Dwarf<EndianSlice<'a, RunTimeEndian>>,
+    dwarf: Dwarf<EndianRcSlice<RunTimeEndian>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -58,15 +61,15 @@ pub enum VarLocation {
 }
 
 #[derive(Default, Clone, PartialEq, Eq)]
-pub struct DebugEntryData<'a> {
-    pub name: &'a str,
+pub struct DebugEntryData {
+    pub name: String,
     pub addr: Option<u64>,
-    pub params: Vec<(&'a str, VarLocation)>,
+    pub params: Vec<(String, VarLocation)>,
 }
 
-type ReaderType<'a> = EndianSlice<'a, RunTimeEndian>;
-type EntryType<'a> = DebuggingInformationEntry<EndianSlice<'a, RunTimeEndian>, usize>;
-type UnitType<'a> = Unit<EndianSlice<'a, RunTimeEndian>, usize>;
+type ReaderType = EndianRcSlice<RunTimeEndian>;
+type EntryType = DebuggingInformationEntry<ReaderType, usize>;
+type UnitType = Unit<ReaderType, usize>;
 
 impl<'a> DebugInfo<'a> {
     pub fn new(data: &'a [u8]) -> Result<Self, object::Error>  {
@@ -77,12 +80,12 @@ impl<'a> DebugInfo<'a> {
             RunTimeEndian::Big
         };
         let section_loader = |id: gimli::SectionId|
-            -> Result<EndianSlice<'a, RunTimeEndian>, object::Error> {
+            -> Result<EndianRcSlice<RunTimeEndian>, object::Error> {
                 let section_data = match obj.section_by_name(id.name()) {
-                    Some(section) => section.data()?,
+                    Some(section) => Rc::from(section.data()?),
                     None => Default::default(),
                 };
-                Ok(EndianSlice::new(section_data, endian))
+                Ok(EndianRcSlice::new(section_data, endian))
             };
         let dwarf = Dwarf::load(section_loader)?;
         Ok(DebugInfo {
@@ -107,7 +110,7 @@ impl<'a> DebugInfo<'a> {
     }
 
     pub fn get_all_func_name_and_addr(&self)
-            -> anyhow::Result<Vec<DebugEntryData<'a>>> {
+            -> anyhow::Result<Vec<DebugEntryData>> {
         let mut entries_data = Vec::new();
         let mut cur_entry_data = DebugEntryData::default();
         for header in self.dwarf.units() {
@@ -121,9 +124,9 @@ impl<'a> DebugInfo<'a> {
     }
 
     fn parse_entries(&self,
-        unit: &UnitType<'a>,
-        entries_data: &mut Vec<DebugEntryData<'a>>,
-        cur_entry_data: &mut DebugEntryData<'a>) -> anyhow::Result<()> {
+        unit: &UnitType,
+        entries_data: &mut Vec<DebugEntryData>,
+        cur_entry_data: &mut DebugEntryData) -> anyhow::Result<()> {
 
         let mut entries = unit.entries();
         let mut inside_fn_subtree = false;
@@ -137,7 +140,7 @@ impl<'a> DebugInfo<'a> {
                         info!("function without a name found in debug info; skipping");
                         continue;
                     },
-                    Some(s) => s,
+                    Some(s) => s.to_string(),
                 };
 
                 inside_fn_subtree = true;
@@ -153,7 +156,7 @@ impl<'a> DebugInfo<'a> {
                         debug!("found parameter name: {}", name);
                         let param_loc = self.entry_location(&unit, &entry)?;
                         debug!("found parameter location: {:?}", param_loc);
-                        cur_entry_data.params.push((name, param_loc));
+                        cur_entry_data.params.push((name.to_string(), param_loc));
                     }
             } else {
                 inside_fn_subtree = false;
@@ -164,8 +167,8 @@ impl<'a> DebugInfo<'a> {
         Ok(())
     }
 
-    fn finish_entry(entries_data: &mut Vec<DebugEntryData<'a>>,
-        cur_entry_data: &mut DebugEntryData<'a>) {
+    fn finish_entry(entries_data: &mut Vec<DebugEntryData>,
+        cur_entry_data: &mut DebugEntryData) {
         if *cur_entry_data != DebugEntryData::default() {
             // this clone() call is just here to make the borrow checker
             // happy, since we'll overwrite cur_entry_data immediately
@@ -174,15 +177,14 @@ impl<'a> DebugInfo<'a> {
         }
     }
 
-    pub fn entry_name(&self, unit: &UnitType<'a>, entry: &EntryType<'a>)
-            -> Option<&'a str> {
+    pub fn entry_name(&self, unit: &UnitType, entry: &EntryType)
+            -> Option<String> {
         for attr in entry.attrs.iter() {
             if attr.name() == gimli::constants::DW_AT_name {
                 if let Some(endian_slice) =
                         self.dwarf.attr_string(&unit, attr.value()).ok() {
-                    let opt_name = endian_slice.to_string().ok();
-                    if opt_name.is_some() {
-                        return opt_name;
+                    if let Ok(opt_name) = endian_slice.to_string() {
+                        return Some(opt_name.into_owned());
                     }
                 }
             }
@@ -191,7 +193,7 @@ impl<'a> DebugInfo<'a> {
     }
 
     // get the address in DW_AT_low_pc DWARF attribute
-    pub fn entry_low_pc(&self, entry: &EntryType<'a>) -> Option<u64> {
+    pub fn entry_low_pc(&self, entry: &EntryType) -> Option<u64> {
         for attr in entry.attrs.iter() {
             if attr.name() == gimli::constants::DW_AT_low_pc {
                 if let AttributeValue::Addr(addr) = attr.value() {
@@ -203,7 +205,7 @@ impl<'a> DebugInfo<'a> {
     }
 
     // get entry's location.
-    fn entry_location(&self, unit: &UnitType<'a>, entry: &EntryType<'a>)
+    fn entry_location(&self, unit: &UnitType, entry: &EntryType)
             -> anyhow::Result<VarLocation> {
         for attr in entry.attrs.iter() {
             // in x86-64, we need the entry's type to determine if it goes in
@@ -239,9 +241,9 @@ impl<'a> DebugInfo<'a> {
     // resolves an AttibuteValue that is a reference to another
     // debugging information entry.
     fn resolve_ref_to_entry(&self,
-        unit: &UnitType<'a>,
-        attr_val: &AttributeValue<ReaderType<'a>>)
-            -> anyhow::Result<EntryType<'a>> {
+        unit: &UnitType,
+        attr_val: &AttributeValue<ReaderType>)
+            -> anyhow::Result<EntryType> {
         let ref_entry_offset = match attr_val {
             AttributeValue::UnitRef(offset) => *offset,
             AttributeValue::DebugInfoRef(offset) => offset
