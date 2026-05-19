@@ -20,6 +20,7 @@ use std::{
     fmt::Debug,
     error::Error,
     default::Default,
+    mem,
     rc::Rc,
 };
 
@@ -170,10 +171,8 @@ impl<'a> DebugInfo<'a> {
     fn finish_entry(entries_data: &mut Vec<DebugEntryData>,
         cur_entry_data: &mut DebugEntryData) {
         if *cur_entry_data != DebugEntryData::default() {
-            // this clone() call is just here to make the borrow checker
-            // happy, since we'll overwrite cur_entry_data immediately
-            entries_data.push(cur_entry_data.clone());
-            *cur_entry_data = DebugEntryData::default();
+            // move cur_entry_data out, and replace it with the default data
+            entries_data.push(mem::take(cur_entry_data));
         }
     }
 
