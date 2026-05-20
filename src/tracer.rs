@@ -191,6 +191,9 @@ pub struct Tracer {
 
     /// Child process's PID
     child_pid: Pid,
+
+    /// debug information associated with child process binary
+    debug_info: DebugInfo,
 }
 
 impl Tracer {
@@ -237,6 +240,7 @@ impl Tracer {
             fn_data_per_addr,
             fn_data_unknown_addr,
             child_pid,
+            debug_info,
         })
     }
 
