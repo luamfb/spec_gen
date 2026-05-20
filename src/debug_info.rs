@@ -47,8 +47,8 @@ use log::{
     warn,
 };
 
-pub struct DebugInfo<'a> {
-    obj: object::File<'a>,
+pub struct DebugInfo {
+    arch: object::Architecture,
     dwarf: Dwarf<EndianRcSlice<RunTimeEndian>>,
 }
 
@@ -72,8 +72,8 @@ type ReaderType = EndianRcSlice<RunTimeEndian>;
 type EntryType = DebuggingInformationEntry<ReaderType, usize>;
 type UnitType = Unit<ReaderType, usize>;
 
-impl<'a> DebugInfo<'a> {
-    pub fn new(data: &'a [u8]) -> Result<Self, object::Error>  {
+impl DebugInfo {
+    pub fn new(data: &[u8]) -> Result<Self, object::Error>  {
         let obj = object::File::parse(&*data)?;
         let endian = if obj.is_little_endian() {
             RunTimeEndian::Little
@@ -90,15 +90,16 @@ impl<'a> DebugInfo<'a> {
             };
         let dwarf = Dwarf::load(section_loader)?;
         Ok(DebugInfo {
-            obj,
+            arch: obj.architecture(),
             dwarf,
         })
     }
 
     pub fn get_architecture(&self) -> object::Architecture {
-        self.obj.architecture()
+        self.arch
     }
 
+    /*
     pub fn dump_sections<F: io::Write + Debug>(&self, file: &mut F)
             -> anyhow::Result<()> {
         for section in self.obj.sections() {
@@ -109,6 +110,7 @@ impl<'a> DebugInfo<'a> {
         }
         Ok(())
     }
+    */
 
     pub fn get_all_func_name_and_addr(&self)
             -> anyhow::Result<Vec<DebugEntryData>> {
