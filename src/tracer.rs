@@ -226,7 +226,7 @@ impl Tracer {
             match entry_data.addr {
                 None => { fn_data_unknown_addr.insert(fn_data); },
                 Some(low_pc_addr) => {
-                    let addr = text_section_addr | low_pc_addr;
+                    let addr = compute_fn_addr(text_section_addr, low_pc_addr);
                     debug!("associated function '{}' with address '{:#x}'",
                         fn_data.name, addr);
                     fn_data_per_addr.insert(addr, fn_data);
@@ -448,6 +448,30 @@ impl Tracer {
         println!(")");
         Ok(())
     }
+}
+
+/// Compute a function's address in a running process given the beginning of its
+/// .text address and the DW_AT_low_pc attribute obtained from the debug
+/// information.
+/// This is effectively an OR of the two addresses, but one that only changes
+/// the bits of text_section_addr when they belong to a leading zero hex digit:
+///
+/// ```
+/// assert_eq!(compute_fn_addr(0x200, 0xff3), 0x2f3); // same as 0x200 | 0x0f3
+/// ```
+///
+fn compute_fn_addr(text_section_addr: u64, low_pc_addr: u64) -> u64 {
+    let mut mask = u64::MAX << 4;
+    let mut new_mask = mask;
+    while (new_mask & text_section_addr) == text_section_addr {
+        mask = new_mask;
+        new_mask = new_mask << 4;
+    }
+    // here, `mask` should be 0xff..f00..00, where the number of trailing zeros
+    // is exactly the same as in text_section_addr.
+
+    let capped_low_pc_addr = (!mask) & low_pc_addr;
+    text_section_addr | capped_low_pc_addr
 }
 
 fn unix_x86_64_call_conv_nth_reg(regs: &libc::user_regs_struct, n: usize)
